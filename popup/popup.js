@@ -437,8 +437,23 @@ async function handleCloseUnbookmarked(scope) {
     const tabs = await getTabs(scope);
     const bookmarkedUrls = await getBookmarkedUrlSet();
 
+    const plan = planCloseUnbookmarkedTabs(tabs, bookmarkedUrls);
+
+    if (plan.toCloseTabs.length > 0) {
+      const inScope = scope === 'current' ? 'current window' : 'all windows';
+      const n = plan.toCloseTabs.length;
+      const details = describeUnbookmarkedDetails({ ...plan, failed: 0 });
+      const ok = window.confirm(
+        `Close ${n} unbookmarked tab${n === 1 ? '' : 's'} in the ${inScope}?${details}\n\nPinned/protected tabs are skipped automatically.`
+      );
+      if (!ok) {
+        setStatus('Canceled.', 'info');
+        return;
+      }
+    }
+
     setStatus('Closing unbookmarked tabs...', 'info');
-    const result = await closeUnbookmarkedTabs(tabs, bookmarkedUrls);
+    const result = await closeUnbookmarkedTabs(tabs, bookmarkedUrls, plan);
 
     if (Array.isArray(result.closedTabs) && result.closedTabs.length > 0) {
       setLastClosedTabs(result.closedTabs);
@@ -602,19 +617,9 @@ async function getTabs(scope) {
   throw new Error(`Unsupported scope: ${scope}`);
 }
 
-// Close tabs not present in the bookmarks tree
-async function closeUnbookmarkedTabs(tabs, bookmarkedUrls) {
-  if (!Array.isArray(tabs) || tabs.length === 0) {
-    return {
-      closed: 0,
-      failed: 0,
-      keptBookmarked: 0,
-      skippedPinned: 0,
-      skippedProtected: 0,
-      skippedNoUrl: 0,
-      closedTabs: []
-    };
-  }
+function planCloseUnbookmarkedTabs(tabs, bookmarkedUrls) {
+  const safeTabs = Array.isArray(tabs) ? tabs : [];
+  const bookmarked = bookmarkedUrls instanceof Set ? bookmarkedUrls : new Set();
 
   const toCloseTabs = [];
   let keptBookmarked = 0;
@@ -622,7 +627,7 @@ async function closeUnbookmarkedTabs(tabs, bookmarkedUrls) {
   let skippedProtected = 0;
   let skippedNoUrl = 0;
 
-  for (const tab of tabs) {
+  for (const tab of safeTabs) {
     if (!tab || tab.id == null) continue;
 
     const url = tab.url || '';
@@ -642,7 +647,7 @@ async function closeUnbookmarkedTabs(tabs, bookmarkedUrls) {
     }
 
     const normalized = normalizeUrlForBookmarkLookup(url);
-    if (bookmarkedUrls.has(normalized)) {
+    if (bookmarked.has(normalized)) {
       keptBookmarked++;
       continue;
     }
@@ -650,16 +655,16 @@ async function closeUnbookmarkedTabs(tabs, bookmarkedUrls) {
     toCloseTabs.push(tab);
   }
 
-  if (toCloseTabs.length === 0) {
-    return {
-      closed: 0,
-      failed: 0,
-      keptBookmarked,
-      skippedPinned,
-      skippedProtected,
-      skippedNoUrl,
-      closedTabs: []
-    };
+  return { toCloseTabs, keptBookmarked, skippedPinned, skippedProtected, skippedNoUrl };
+}
+
+// Close tabs not present in the bookmarks tree
+async function closeUnbookmarkedTabs(tabs, bookmarkedUrls, plan) {
+  const computedPlan = plan || planCloseUnbookmarkedTabs(tabs, bookmarkedUrls);
+  const { toCloseTabs, keptBookmarked, skippedPinned, skippedProtected, skippedNoUrl } = computedPlan;
+
+  if (!Array.isArray(toCloseTabs) || toCloseTabs.length === 0) {
+    return { closed: 0, failed: 0, keptBookmarked, skippedPinned, skippedProtected, skippedNoUrl, closedTabs: [] };
   }
 
   const results = await Promise.allSettled(toCloseTabs.map((tab) => removeTab(tab.id)));
