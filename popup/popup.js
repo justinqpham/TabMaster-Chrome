@@ -7,12 +7,14 @@ const dedupCurrentBtn = document.getElementById('dedupCurrent');
 const dedupAllBtn = document.getElementById('dedupAll');
 const closeUnbookmarkedCurrentBtn = document.getElementById('closeUnbookmarkedCurrent');
 const closeUnbookmarkedAllBtn = document.getElementById('closeUnbookmarkedAll');
+const undoLastCloseBtn = document.getElementById('undoLastClose');
 const statusEl = document.getElementById('status');
 
 let allTabs = [];
 let currentWindowId = null;
 let duplicateUrls = new Set();
 let bookmarkedUrlsCache = null;
+let lastClosedTabs = [];
 
 // ---- Chrome API helpers ---------------------------------------------------
 function withRuntimeError(reject) {
@@ -65,6 +67,33 @@ function removeTab(tabId) {
     chrome.tabs.remove(tabId, () => {
       if (withRuntimeError(reject)) return;
       resolve();
+    });
+  });
+}
+
+function createTab(createProperties) {
+  return new Promise((resolve, reject) => {
+    chrome.tabs.create(createProperties, (tab) => {
+      if (withRuntimeError(reject)) return;
+      resolve(tab);
+    });
+  });
+}
+
+function getWindow(windowId) {
+  return new Promise((resolve, reject) => {
+    chrome.windows.get(windowId, {}, (window) => {
+      if (withRuntimeError(reject)) return;
+      resolve(window);
+    });
+  });
+}
+
+function createWindow(createData) {
+  return new Promise((resolve, reject) => {
+    chrome.windows.create(createData, (window) => {
+      if (withRuntimeError(reject)) return;
+      resolve(window);
     });
   });
 }
@@ -122,6 +151,25 @@ async function getBookmarkedUrlSet() {
   return bookmarkedUrlsCache;
 }
 
+function canUndo() {
+  return Array.isArray(lastClosedTabs) && lastClosedTabs.length > 0;
+}
+
+function updateUndoButtonLabel() {
+  if (!undoLastCloseBtn) return;
+  if (!canUndo()) {
+    undoLastCloseBtn.textContent = 'Undo Last Close';
+    return;
+  }
+  const n = lastClosedTabs.length;
+  undoLastCloseBtn.textContent = `Undo Last Close (${n})`;
+}
+
+function setLastClosedTabs(tabInfos) {
+  lastClosedTabs = Array.isArray(tabInfos) ? tabInfos : [];
+  updateUndoButtonLabel();
+}
+
 // ---- Initialization -------------------------------------------------------
 document.addEventListener('DOMContentLoaded', async () => {
   try {
@@ -138,6 +186,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     dedupAllBtn.addEventListener('click', () => handleDedup('all'));
     closeUnbookmarkedCurrentBtn.addEventListener('click', () => handleCloseUnbookmarked('current'));
     closeUnbookmarkedAllBtn.addEventListener('click', () => handleCloseUnbookmarked('all'));
+    undoLastCloseBtn.addEventListener('click', handleUndoLastClose);
     searchInput.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') {
         window.close();
@@ -329,6 +378,18 @@ function getWindowNumber(windowId) {
   return uniqueWindowIds.indexOf(windowId) + 1;
 }
 
+function toTabRestoreInfo(tab) {
+  if (!tab) return null;
+  const url = tab.url || '';
+  if (!url) return null;
+
+  return {
+    url,
+    windowId: tab.windowId,
+    index: typeof tab.index === 'number' ? tab.index : null
+  };
+}
+
 // Handle deduplication
 async function handleDedup(scope) {
   setActionButtonsDisabled(true);
@@ -337,6 +398,10 @@ async function handleDedup(scope) {
   try {
     const tabs = await getTabs(scope);
     const result = await closeDuplicateTabs(tabs);
+
+    if (Array.isArray(result.closedTabs) && result.closedTabs.length > 0) {
+      setLastClosedTabs(result.closedTabs);
+    }
 
     if (result.closed === 0) {
       let note = 'No duplicate tabs found.';
@@ -375,6 +440,10 @@ async function handleCloseUnbookmarked(scope) {
     setStatus('Closing unbookmarked tabs...', 'info');
     const result = await closeUnbookmarkedTabs(tabs, bookmarkedUrls);
 
+    if (Array.isArray(result.closedTabs) && result.closedTabs.length > 0) {
+      setLastClosedTabs(result.closedTabs);
+    }
+
     if (result.closed === 0) {
       let note = 'No unbookmarked tabs found.';
       const details = describeUnbookmarkedDetails(result);
@@ -397,6 +466,131 @@ async function handleCloseUnbookmarked(scope) {
   }
 }
 
+async function handleUndoLastClose() {
+  if (!canUndo()) {
+    setStatus('Nothing to undo.', 'info');
+    return;
+  }
+
+  setActionButtonsDisabled(true);
+
+  const toRestore = [...lastClosedTabs];
+  const label = `Restoring ${toRestore.length} tab${toRestore.length === 1 ? '' : 's'}...`;
+  setStatus(label, 'info');
+
+  try {
+    const result = await restoreClosedTabs(toRestore);
+    const restored = result.restored ?? 0;
+    const failedTabs = Array.isArray(result.failedTabs) ? result.failedTabs : [];
+    const failed = failedTabs.length;
+
+    if (restored === 0 && failed > 0) {
+      setStatus(`Unable to restore tabs (${failed} failed).`, 'error');
+    } else if (failed > 0) {
+      setStatus(`Restored ${restored} tab${restored === 1 ? '' : 's'} (${failed} failed).`, 'success');
+    } else {
+      setStatus(`Restored ${restored} tab${restored === 1 ? '' : 's'}.`, 'success');
+    }
+
+    // Allow retry for the subset that failed to restore.
+    setLastClosedTabs(failedTabs);
+
+    await loadTabs();
+  } catch (error) {
+    const readable = error && error.message ? error.message : String(error);
+    setStatus(`Error: ${readable}`, 'error');
+    console.error('Undo failed:', error);
+  } finally {
+    setActionButtonsDisabled(false);
+  }
+}
+
+async function restoreClosedTabs(tabInfos) {
+  const valid = (Array.isArray(tabInfos) ? tabInfos : []).filter((info) => info && info.url);
+  if (valid.length === 0) {
+    return { restored: 0, failedTabs: [] };
+  }
+
+  // Group by original windowId so we can recreate a window if it was closed.
+  const byWindow = new Map();
+  for (const info of valid) {
+    const key = info.windowId ?? 'unknown';
+    if (!byWindow.has(key)) byWindow.set(key, []);
+    byWindow.get(key).push(info);
+  }
+
+  let restored = 0;
+  const failedTabs = [];
+
+  for (const [origWindowId, infos] of byWindow.entries()) {
+    const sorted = [...infos].sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
+
+    let targetWindowId = origWindowId;
+    let windowExists = true;
+    if (typeof origWindowId !== 'number') {
+      windowExists = false;
+    } else {
+      try {
+        await getWindow(origWindowId);
+      } catch {
+        windowExists = false;
+      }
+    }
+
+    if (!windowExists) {
+      try {
+        const urls = sorted.map((t) => t.url);
+        const win = await createWindow({ url: urls, focused: false });
+        if (!win || win.id == null) {
+          throw new Error('Failed to create window.');
+        }
+        restored += urls.length;
+        continue;
+      } catch (error) {
+        // Fall back to restoring tabs individually into a newly created window.
+        try {
+          const first = sorted[0];
+          const win = await createWindow({ url: first.url, focused: false });
+          if (!win || win.id == null) {
+            throw new Error('Failed to create window.');
+          }
+          targetWindowId = win.id;
+          restored += 1;
+
+          for (const info of sorted.slice(1)) {
+            try {
+              await createTab({ windowId: targetWindowId, url: info.url, active: false });
+              restored += 1;
+            } catch {
+              failedTabs.push(info);
+            }
+          }
+          continue;
+        } catch {
+          failedTabs.push(...sorted);
+          continue;
+        }
+      }
+    }
+
+    for (const info of sorted) {
+      const createProps = { windowId: targetWindowId, url: info.url, active: false };
+      if (typeof info.index === 'number') {
+        createProps.index = info.index;
+      }
+
+      try {
+        await createTab(createProps);
+        restored += 1;
+      } catch {
+        failedTabs.push(info);
+      }
+    }
+  }
+
+  return { restored, failedTabs };
+}
+
 // Get tabs based on scope
 async function getTabs(scope) {
   if (scope === 'current') {
@@ -417,11 +611,12 @@ async function closeUnbookmarkedTabs(tabs, bookmarkedUrls) {
       keptBookmarked: 0,
       skippedPinned: 0,
       skippedProtected: 0,
-      skippedNoUrl: 0
+      skippedNoUrl: 0,
+      closedTabs: []
     };
   }
 
-  const toCloseIds = [];
+  const toCloseTabs = [];
   let keptBookmarked = 0;
   let skippedPinned = 0;
   let skippedProtected = 0;
@@ -452,22 +647,27 @@ async function closeUnbookmarkedTabs(tabs, bookmarkedUrls) {
       continue;
     }
 
-    toCloseIds.push(tab.id);
+    toCloseTabs.push(tab);
   }
 
-  if (toCloseIds.length === 0) {
+  if (toCloseTabs.length === 0) {
     return {
       closed: 0,
       failed: 0,
       keptBookmarked,
       skippedPinned,
       skippedProtected,
-      skippedNoUrl
+      skippedNoUrl,
+      closedTabs: []
     };
   }
 
-  const results = await Promise.allSettled(toCloseIds.map((tabId) => removeTab(tabId)));
-  const closed = results.filter((entry) => entry.status === 'fulfilled').length;
+  const results = await Promise.allSettled(toCloseTabs.map((tab) => removeTab(tab.id)));
+  const closedTabs = results
+    .map((entry, idx) => (entry.status === 'fulfilled' ? toTabRestoreInfo(toCloseTabs[idx]) : null))
+    .filter(Boolean);
+
+  const closed = closedTabs.length;
   const failed = results.length - closed;
 
   return {
@@ -476,14 +676,15 @@ async function closeUnbookmarkedTabs(tabs, bookmarkedUrls) {
     keptBookmarked,
     skippedPinned,
     skippedProtected,
-    skippedNoUrl
+    skippedNoUrl,
+    closedTabs
   };
 }
 
 // Close duplicate tabs
 async function closeDuplicateTabs(tabs) {
   if (!Array.isArray(tabs) || tabs.length === 0) {
-    return { closed: 0, failed: 0, skippedPinned: 0, skippedProtected: 0 };
+    return { closed: 0, failed: 0, skippedPinned: 0, skippedProtected: 0, closedTabs: [] };
   }
 
   const sortedTabs = [...tabs].sort((a, b) => {
@@ -494,7 +695,7 @@ async function closeDuplicateTabs(tabs) {
   });
 
   const seenUrls = new Map();
-  const duplicateIds = [];
+  const duplicateTabs = [];
   let skippedPinned = 0;
   let skippedProtected = 0;
 
@@ -520,21 +721,25 @@ async function closeDuplicateTabs(tabs) {
     }
 
     if (seenUrls.has(url)) {
-      duplicateIds.push(tab.id);
+      duplicateTabs.push(tab);
     } else {
       seenUrls.set(url, tab.id);
     }
   }
 
-  if (duplicateIds.length === 0) {
-    return { closed: 0, failed: 0, skippedPinned, skippedProtected };
+  if (duplicateTabs.length === 0) {
+    return { closed: 0, failed: 0, skippedPinned, skippedProtected, closedTabs: [] };
   }
 
-  const results = await Promise.allSettled(duplicateIds.map((tabId) => removeTab(tabId)));
-  const closed = results.filter((entry) => entry.status === 'fulfilled').length;
+  const results = await Promise.allSettled(duplicateTabs.map((tab) => removeTab(tab.id)));
+  const closedTabs = results
+    .map((entry, idx) => (entry.status === 'fulfilled' ? toTabRestoreInfo(duplicateTabs[idx]) : null))
+    .filter(Boolean);
+
+  const closed = closedTabs.length;
   const failed = results.length - closed;
 
-  return { closed, failed, skippedPinned, skippedProtected };
+  return { closed, failed, skippedPinned, skippedProtected, closedTabs };
 }
 
 // Check if URL is protected
@@ -596,6 +801,7 @@ function setActionButtonsDisabled(disabled) {
   dedupAllBtn.disabled = disabled;
   closeUnbookmarkedCurrentBtn.disabled = disabled;
   closeUnbookmarkedAllBtn.disabled = disabled;
+  undoLastCloseBtn.disabled = disabled || !canUndo();
 }
 
 // Set status message

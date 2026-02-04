@@ -21,6 +21,9 @@ TabMaster is a Manifest V3 extension for Chromium-based browsers (Chrome, Brave,
 - Works on the current window or all windows
 - Skips pinned tabs and protected/internal URLs
 
+### ↩️ Undo
+- Undo the most recent close action from the extension (restores the closed tabs)
+
 ## Installation
 
 ### Load Unpacked (dev/test)
@@ -40,7 +43,8 @@ Creates `tabmaster-chrome.zip` containing the manifest, popup, and icons.
 3. Click a result to focus that tab.
 4. Use **Close Duplicates** for the current window or all windows. First occurrences stay open; later duplicates close. Pinned/protected URLs are never closed.
 5. Use **Close Unbookmarked** to close tabs that are not saved in Bookmarks.
-6. Press `Escape` to close the popup.
+6. Click **Undo Last Close** to restore the tabs closed by your most recent close action.
+7. Press `Escape` to close the popup.
 
 ## Technical Details
 - Manifest V3, `action` popup only (no background service worker).

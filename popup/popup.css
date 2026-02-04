@@ -203,6 +203,23 @@ body {
   cursor: not-allowed;
 }
 
+.undo-section {
+  margin-top: 12px;
+}
+
+.btn-undo {
+  width: 100%;
+  border-color: #ffd6a5;
+  background-color: #fff7ed;
+  color: #7c2d12;
+}
+
+.btn-undo:hover:not(:disabled) {
+  background-color: #ffedd5;
+  border-color: #fdba74;
+  color: #9a3412;
+}
+
 .status {
   min-height: 1.2em;
   margin-top: 12px;
