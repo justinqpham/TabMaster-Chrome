@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "TabMaster - Tab Search",
   "description": "Search and navigate through your open tabs quickly. Find and close duplicate tabs.",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "author": "Justin Pham",
   "action": {
     "default_title": "TabMaster",
@@ -20,6 +20,6 @@
     "48": "icons/icon-48.png",
     "128": "icons/icon-128.png"
   },
-  "permissions": ["tabs"],
+  "permissions": ["tabs", "bookmarks"],
   "minimum_chrome_version": "88"
 }

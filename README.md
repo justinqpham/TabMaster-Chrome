@@ -16,6 +16,11 @@ TabMaster is a Manifest V3 extension for Chromium-based browsers (Chrome, Brave,
 - One-click cleanup in the current window or across all windows
 - Skips pinned tabs and protected/internal URLs
 
+### 🔖 Bookmark Cleanup
+- Close tabs that are not saved in your Bookmarks
+- Works on the current window or all windows
+- Skips pinned tabs and protected/internal URLs
+
 ## Installation
 
 ### Load Unpacked (dev/test)
@@ -34,11 +39,12 @@ Creates `tabmaster-chrome.zip` containing the manifest, popup, and icons.
 2. Type to filter tabs; choose **Current Window** or **All Windows**.
 3. Click a result to focus that tab.
 4. Use **Close Duplicates** for the current window or all windows. First occurrences stay open; later duplicates close. Pinned/protected URLs are never closed.
-5. Press `Escape` to close the popup.
+5. Use **Close Unbookmarked** to close tabs that are not saved in Bookmarks.
+6. Press `Escape` to close the popup.
 
 ## Technical Details
 - Manifest V3, `action` popup only (no background service worker).
-- Permission: `tabs` (needed to list, focus, and close tabs).
+- Permissions: `tabs` (needed to list, focus, and close tabs), `bookmarks` (needed to check if a URL is bookmarked).
 - Icons: 16/32/48/96/128 PNGs plus `icon.svg`.
 - Primary files:
   - `manifest.json`

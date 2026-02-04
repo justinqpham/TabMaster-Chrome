@@ -5,11 +5,14 @@ const currentWindowRadio = document.getElementById('currentWindow');
 const allWindowsRadio = document.getElementById('allWindows');
 const dedupCurrentBtn = document.getElementById('dedupCurrent');
 const dedupAllBtn = document.getElementById('dedupAll');
+const closeUnbookmarkedCurrentBtn = document.getElementById('closeUnbookmarkedCurrent');
+const closeUnbookmarkedAllBtn = document.getElementById('closeUnbookmarkedAll');
 const statusEl = document.getElementById('status');
 
 let allTabs = [];
 let currentWindowId = null;
 let duplicateUrls = new Set();
+let bookmarkedUrlsCache = null;
 
 // ---- Chrome API helpers ---------------------------------------------------
 function withRuntimeError(reject) {
@@ -66,6 +69,59 @@ function removeTab(tabId) {
   });
 }
 
+function getBookmarksTree() {
+  return new Promise((resolve, reject) => {
+    if (!chrome.bookmarks || !chrome.bookmarks.getTree) {
+      reject(new Error('Bookmarks permission is missing.'));
+      return;
+    }
+    chrome.bookmarks.getTree((nodes) => {
+      if (withRuntimeError(reject)) return;
+      resolve(nodes || []);
+    });
+  });
+}
+
+function normalizeUrlForBookmarkLookup(url) {
+  if (!url || typeof url !== 'string') return '';
+  try {
+    const u = new URL(url);
+    // Fragments are rarely meaningful for "saved vs not saved" behavior.
+    u.hash = '';
+    return u.toString();
+  } catch {
+    return url;
+  }
+}
+
+function collectBookmarkedUrls(bookmarkTreeNodes) {
+  const urls = new Set();
+  const stack = Array.isArray(bookmarkTreeNodes) ? [...bookmarkTreeNodes] : [];
+
+  while (stack.length > 0) {
+    const node = stack.pop();
+    if (!node) continue;
+
+    if (node.url) {
+      const normalized = normalizeUrlForBookmarkLookup(node.url);
+      if (normalized) urls.add(normalized);
+    }
+
+    if (Array.isArray(node.children) && node.children.length > 0) {
+      stack.push(...node.children);
+    }
+  }
+
+  return urls;
+}
+
+async function getBookmarkedUrlSet() {
+  if (bookmarkedUrlsCache) return bookmarkedUrlsCache;
+  const tree = await getBookmarksTree();
+  bookmarkedUrlsCache = collectBookmarkedUrls(tree);
+  return bookmarkedUrlsCache;
+}
+
 // ---- Initialization -------------------------------------------------------
 document.addEventListener('DOMContentLoaded', async () => {
   try {
@@ -80,6 +136,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     allWindowsRadio.addEventListener('change', handleSearch);
     dedupCurrentBtn.addEventListener('click', () => handleDedup('current'));
     dedupAllBtn.addEventListener('click', () => handleDedup('all'));
+    closeUnbookmarkedCurrentBtn.addEventListener('click', () => handleCloseUnbookmarked('current'));
+    closeUnbookmarkedAllBtn.addEventListener('click', () => handleCloseUnbookmarked('all'));
     searchInput.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') {
         window.close();
@@ -273,7 +331,7 @@ function getWindowNumber(windowId) {
 
 // Handle deduplication
 async function handleDedup(scope) {
-  setDedupButtonsDisabled(true);
+  setActionButtonsDisabled(true);
   setStatus('Scanning for duplicate tabs...', 'info');
 
   try {
@@ -301,7 +359,41 @@ async function handleDedup(scope) {
     setStatus(`Error: ${readable}`, 'error');
     console.error('Deduplication failed:', error);
   } finally {
-    setDedupButtonsDisabled(false);
+    setActionButtonsDisabled(false);
+  }
+}
+
+// Handle closing tabs that are not saved in Bookmarks
+async function handleCloseUnbookmarked(scope) {
+  setActionButtonsDisabled(true);
+  setStatus('Loading bookmarks...', 'info');
+
+  try {
+    const tabs = await getTabs(scope);
+    const bookmarkedUrls = await getBookmarkedUrlSet();
+
+    setStatus('Closing unbookmarked tabs...', 'info');
+    const result = await closeUnbookmarkedTabs(tabs, bookmarkedUrls);
+
+    if (result.closed === 0) {
+      let note = 'No unbookmarked tabs found.';
+      const details = describeUnbookmarkedDetails(result);
+      if (details) note += details;
+      setStatus(note, 'success');
+    } else {
+      let message = `Closed ${result.closed} unbookmarked tab${result.closed === 1 ? '' : 's'}.`;
+      const details = describeUnbookmarkedDetails(result);
+      if (details) message += details;
+      setStatus(message, 'success');
+
+      await loadTabs();
+    }
+  } catch (error) {
+    const readable = error && error.message ? error.message : String(error);
+    setStatus(`Error: ${readable}`, 'error');
+    console.error('Close unbookmarked failed:', error);
+  } finally {
+    setActionButtonsDisabled(false);
   }
 }
 
@@ -314,6 +406,78 @@ async function getTabs(scope) {
     return allTabs;
   }
   throw new Error(`Unsupported scope: ${scope}`);
+}
+
+// Close tabs not present in the bookmarks tree
+async function closeUnbookmarkedTabs(tabs, bookmarkedUrls) {
+  if (!Array.isArray(tabs) || tabs.length === 0) {
+    return {
+      closed: 0,
+      failed: 0,
+      keptBookmarked: 0,
+      skippedPinned: 0,
+      skippedProtected: 0,
+      skippedNoUrl: 0
+    };
+  }
+
+  const toCloseIds = [];
+  let keptBookmarked = 0;
+  let skippedPinned = 0;
+  let skippedProtected = 0;
+  let skippedNoUrl = 0;
+
+  for (const tab of tabs) {
+    if (!tab || tab.id == null) continue;
+
+    const url = tab.url || '';
+    if (!url) {
+      skippedNoUrl++;
+      continue;
+    }
+
+    if (tab.pinned) {
+      skippedPinned++;
+      continue;
+    }
+
+    if (isProtectedUrl(url)) {
+      skippedProtected++;
+      continue;
+    }
+
+    const normalized = normalizeUrlForBookmarkLookup(url);
+    if (bookmarkedUrls.has(normalized)) {
+      keptBookmarked++;
+      continue;
+    }
+
+    toCloseIds.push(tab.id);
+  }
+
+  if (toCloseIds.length === 0) {
+    return {
+      closed: 0,
+      failed: 0,
+      keptBookmarked,
+      skippedPinned,
+      skippedProtected,
+      skippedNoUrl
+    };
+  }
+
+  const results = await Promise.allSettled(toCloseIds.map((tabId) => removeTab(tabId)));
+  const closed = results.filter((entry) => entry.status === 'fulfilled').length;
+  const failed = results.length - closed;
+
+  return {
+    closed,
+    failed,
+    keptBookmarked,
+    skippedPinned,
+    skippedProtected,
+    skippedNoUrl
+  };
 }
 
 // Close duplicate tabs
@@ -399,10 +563,39 @@ function describeSkips({ failed = 0, skippedPinned = 0, skippedProtected = 0 }) 
   return notes.length ? ` (skipped ${notes.join(', ')})` : '';
 }
 
-// Set dedup buttons disabled state
-function setDedupButtonsDisabled(disabled) {
+function describeUnbookmarkedDetails({
+  failed = 0,
+  keptBookmarked = 0,
+  skippedPinned = 0,
+  skippedProtected = 0,
+  skippedNoUrl = 0
+}) {
+  const parts = [];
+
+  if (keptBookmarked > 0) {
+    parts.push(`kept ${keptBookmarked} bookmarked`);
+  }
+
+  const skipped = [];
+  if (skippedPinned > 0) skipped.push(`${skippedPinned} pinned`);
+  if (skippedProtected > 0) skipped.push(`${skippedProtected} protected`);
+  if (skippedNoUrl > 0) skipped.push(`${skippedNoUrl} no URL`);
+  if (skipped.length > 0) {
+    parts.push(`skipped ${skipped.join(', ')}`);
+  }
+
+  if (failed > 0) {
+    parts.push(`${failed} failed`);
+  }
+
+  return parts.length ? ` (${parts.join('; ')})` : '';
+}
+
+function setActionButtonsDisabled(disabled) {
   dedupCurrentBtn.disabled = disabled;
   dedupAllBtn.disabled = disabled;
+  closeUnbookmarkedCurrentBtn.disabled = disabled;
+  closeUnbookmarkedAllBtn.disabled = disabled;
 }
 
 // Set status message
