@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TabMaster</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>TabMaster</h1>
+    </div>
+
+    <div class="search-section">
+      <input type="text" id="searchInput" placeholder="Search tabs..." autofocus>
+
+      <div class="scope-options">
+        <label>
+          <input type="radio" name="scope" value="current" id="currentWindow" checked>
+          Current Window
+        </label>
+        <label>
+          <input type="radio" name="scope" value="all" id="allWindows">
+          All Windows
+        </label>
+      </div>
+
+      <div class="dedup-section">
+        <div class="dedup-label">Close Duplicates:</div>
+        <div class="dedup-buttons">
+          <button id="dedupCurrent" class="btn-dedup">Current Window</button>
+          <button id="dedupAll" class="btn-dedup">All Windows</button>
+        </div>
+      </div>
+
+      <div id="status" class="status" role="status" aria-live="polite"></div>
+    </div>
+
+    <div id="resultsContainer" class="results-container">
+      <div id="resultsList" class="results-list"></div>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
